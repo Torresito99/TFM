@@ -1,297 +1,134 @@
 /*******************************************************************************
  * @file    main.cpp
- * @brief   LilyGO T-Watch V3 2020 - Deep Sleep con Wake-up por movimiento
+ * @brief   FallDetector Watch — Sistema de detección de caídas
  *
- * @details El dispositivo entra en Deep Sleep y se despierta cuando el
- *          acelerómetro BMA423 detecta movimiento (any-motion / wrist tilt).
- *          Base para un futuro sistema de detección de caídas.
+ * @details Sistema de detección de caídas para LilyGO T-Watch V3 2020.
+ *
+ *          Flujo principal:
+ *            1. Deep sleep continuo (consumo mínimo)
+ *            2. BMA423 detecta movimiento brusco → despierta ESP32
+ *            3. ESP32 recoge muestras del acelerómetro (~3 segundos)
+ *            4. Algoritmo de 3 fases analiza si es una caída real:
+ *               - Fase 1: Caída libre (aceleración ~0g)
+ *               - Fase 2: Impacto (pico alto de aceleración)
+ *               - Fase 3: Post-impacto (cambio orientación + inactividad)
+ *            5a. Si es caída → alarma (vibración + sonido + pantalla)
+ *            5b. Si no es caída → vuelve a deep sleep inmediatamente
  *
  * @hardware  LilyGO T-Watch V3 2020
- * @sensor    BMA423 (acelerómetro integrado)
- * @author    Tu nombre
+ * @sensor    BMA423 (acelerómetro 3 ejes)
+ * @author    Torres
  * @date      2025
  ******************************************************************************/
 
-#include <LilyGoWatch.h>
+#include "config.h"
+#include "hardware.h"
+#include "accelerometer.h"
+#include "fall_detection.h"
+#include "alarm.h"
+#include "display.h"
+#include "power_mgmt.h"
+#include <Arduino.h>
 
-/* ─── Objetos globales ─────────────────────────────────────────────────────── */
-TTGOClass   *watch  = nullptr;
-TFT_eSPI    *tft    = nullptr;
-BMA          *bma   = nullptr;
-AXP20X_Class *power = nullptr;
-
-/* ─── Configuración ────────────────────────────────────────────────────────── */
-static constexpr uint32_t AWAKE_TIME_MS        = 5000;   // Tiempo despierto (ms)
-static constexpr uint8_t  BMA423_INT_PIN       = 39;     // GPIO del BMA423 INT
-static constexpr uint8_t  BACKLIGHT_LEVEL      = 128;    // Brillo pantalla (0-255)
-
-/* ─── Contadores persistentes en RTC memory ────────────────────────────────── */
-RTC_DATA_ATTR uint32_t wakeupCount = 0;   // Sobrevive al deep sleep
-
-/* ─── Prototipos ───────────────────────────────────────────────────────────── */
-void initHardware();
-void initAccelerometer();
-void configureWakeupInterrupt();
-void showWakeupScreen();
-void prepareDeepSleep();
-void enterDeepSleep();
-const char *getWakeupReasonString();
+/* ─── Buffer de muestras (global para evitar uso excesivo de stack) ─────── */
+static AccelBuffer accelBuffer;
 
 /*******************************************************************************
- * @brief   Setup principal
+ * @brief   Flujo principal al despertar
  ******************************************************************************/
 void setup()
 {
     Serial.begin(115200);
     delay(100);
 
-    Serial.println("\n========================================");
-    Serial.println("  T-Watch V3 - Motion Wake-up System");
-    Serial.println("========================================");
-
-    // Incrementar contador de wake-ups
     wakeupCount++;
-    Serial.printf("[BOOT] Wake-up #%u | Razón: %s\n", wakeupCount, getWakeupReasonString());
 
-    // Inicializar hardware
-    initHardware();
+    Serial.println("\n═══════════════════════════════════════════");
+    Serial.println("  FallDetector Watch — T-Watch V3");
+    Serial.printf("  Wake-up #%u | Razón: %s\n", wakeupCount, powerGetWakeupReasonString());
+    Serial.println("═══════════════════════════════════════════");
 
-    // Configurar acelerómetro BMA423
-    initAccelerometer();
+    // ── Paso 1: Inicializar hardware mínimo (sin pantalla aún) ──
+    hardwareInitMinimal();
+    accelInit();
+    accelConfigureWakeup();
 
-    // Configurar interrupción de wake-up
-    configureWakeupInterrupt();
+    // ── Paso 2: Recoger muestras del acelerómetro (SIN pantalla — ahorro de batería) ──
+    Serial.printf("[MAIN] Recogiendo datos durante %u ms...\n", ANALYSIS_WINDOW_MS);
+    accelCollectSamples(accelBuffer, ANALYSIS_WINDOW_MS);
 
-    // Mostrar información en pantalla
-    showWakeupScreen();
+    // ── Paso 3: Analizar muestras con el algoritmo de detección ──
+    Serial.println("[MAIN] Ejecutando algoritmo de detección de caídas...");
+    FallResult result = fallDetectionAnalyze(accelBuffer);
+    fallDetectionPrintResult(result);
 
-    // Esperar un tiempo antes de dormir
-    Serial.printf("[MAIN] Permaneciendo despierto %u ms...\n", AWAKE_TIME_MS);
-    delay(AWAKE_TIME_MS);
+    // ── Paso 4: Actuar según resultado ──
+    if (result.detected) {
+        // ═══ CAÍDA DETECTADA ═══
+        Serial.println("[MAIN] *** CAÍDA CONFIRMADA — ACTIVANDO ALARMA ***");
 
-    // Entrar en deep sleep
-    enterDeepSleep();
+        // Ahora SÍ encender pantalla — solo cuando hay caída real
+        hardwareEnableDisplay();
+        displayFallDetected(result);
+        delay(1000);  // Mostrar info antes de la alarma visual
+
+        // Iniciar alarma (vibración + sonido)
+        alarmInit();
+
+        // Bucle de alarma con pantalla parpadeante + sonido + vibración
+        uint32_t alarmStart = millis();
+        bool vibState = false;
+        uint32_t lastVibToggle = 0;
+        bool toneHigh = true;
+        uint32_t lastToneSwitch = 0;
+        uint32_t lastDisplayUpdate = 0;
+
+        while ((millis() - alarmStart) < ALARM_DURATION_MS) {
+            uint32_t now = millis();
+
+            // Vibración on/off
+            uint32_t vibInterval = vibState ? VIBRATION_ON_MS : VIBRATION_OFF_MS;
+            if ((now - lastVibToggle) >= vibInterval) {
+                vibState = !vibState;
+                if (vibState) {
+                    watch->motor->onec();
+                }
+                lastVibToggle = now;
+            }
+
+            // Sirena: alternar tono alto/bajo por el speaker
+            if ((now - lastToneSwitch) >= TONE_SWITCH_MS) {
+                uint16_t freq = toneHigh ? ALARM_TONE_HI_HZ : ALARM_TONE_LO_HZ;
+                alarmPlayToneChunk(freq, TONE_SWITCH_MS);
+                toneHigh = !toneHigh;
+                lastToneSwitch = millis();
+            }
+
+            // Actualizar pantalla (parpadeo cada 500ms)
+            if ((now - lastDisplayUpdate) >= 500) {
+                displayAlarm();
+                lastDisplayUpdate = now;
+            }
+
+            yield();
+        }
+
+        alarmStop();
+        Serial.println("[MAIN] Alarma finalizada");
+    } else {
+        // ═══ FALSO POSITIVO — No es caída ═══
+        Serial.println("[MAIN] No es caída — volviendo a dormir silenciosamente");
+    }
+
+    // ── Paso 5: Volver a deep sleep ──
+    powerEnterDeepSleep();
 }
 
 /*******************************************************************************
- * @brief   Loop (no se alcanza en este diseño)
+ * @brief   Loop — no se ejecuta en este diseño
  ******************************************************************************/
 void loop()
 {
-    // El flujo es: setup → deep sleep → wake-up → setup
-    // Este loop nunca se ejecuta en la lógica actual
-}
-
-/*******************************************************************************
- * @brief   Inicializa el hardware del T-Watch (pantalla, power, etc.)
- ******************************************************************************/
-void initHardware()
-{
-    Serial.println("[HW] Inicializando hardware...");
-
-    // Obtener instancia del watch
-    watch = TTGOClass::getWatch();
-    watch->begin();
-
-    // Referencias a periféricos
-    tft   = watch->tft;
-    power = watch->power;
-    bma   = watch->bma;
-
-    // Encender pantalla
-    watch->openBL();
-    watch->bl->adjust(BACKLIGHT_LEVEL);
-
-    // Configurar pantalla
-    tft->setTextColor(TFT_WHITE, TFT_BLACK);
-    tft->fillScreen(TFT_BLACK);
-    tft->setTextDatum(MC_DATUM);
-
-    Serial.println("[HW] Hardware inicializado correctamente");
-}
-
-/*******************************************************************************
- * @brief   Configura el acelerómetro BMA423 para detectar movimiento
- ******************************************************************************/
-void initAccelerometer()
-{
-    Serial.println("[BMA] Configurando acelerómetro BMA423...");
-
-    // Resetear el sensor
-    bma->begin();
-    bma->attachInterrupt();
-
-    /*
-     * Activar funciones del BMA423:
-     *   - BMA423_WAKEUP:    Detecta movimiento brusco (any-motion)
-     *   - BMA423_TILT:      Detecta inclinación de muñeca
-     *   - BMA423_ANY_MOTION: Detecta cualquier movimiento
-     *
-     * Para detección de caídas futura, BMA423_WAKEUP es un buen punto de partida.
-     * Se puede combinar con BMA423_ANY_MOTION para mayor sensibilidad.
-     */
-
-    // Habilitar la función de wakeup (any-motion basado)
-    bma->enableAccel();
-
-    // Activar feature: wakeup por movimiento
-    bma->enableFeature(BMA423_WAKEUP, true);
-
-    // Opcional: activar también tilt (inclinación de muñeca)
-    bma->enableFeature(BMA423_TILT, true);
-
-    // Mapear las interrupciones al pin INT del BMA423
-    bma->enableWakeupInterrupt(true);
-    bma->enableTiltInterrupt(true);
-
-    Serial.println("[BMA] Acelerómetro configurado:");
-    Serial.println("      - Wakeup (any-motion): ACTIVADO");
-    Serial.println("      - Tilt (inclinación):  ACTIVADO");
-}
-
-/*******************************************************************************
- * @brief   Configura el ESP32 para despertar con la interrupción del BMA423
- ******************************************************************************/
-void configureWakeupInterrupt()
-{
-    Serial.printf("[WAKE] Configurando GPIO %d como fuente de wake-up...\n", BMA423_INT_PIN);
-
-    /*
-     * El BMA423 del T-Watch V3 está conectado al GPIO 39 (INT).
-     * Este pin genera un pulso HIGH cuando se dispara la interrupción.
-     *
-     * esp_sleep_enable_ext0_wakeup:
-     *   - GPIO 39
-     *   - Nivel HIGH (1) para despertar
-     */
-    esp_sleep_enable_ext0_wakeup((gpio_num_t)BMA423_INT_PIN, 1);
-
-    Serial.println("[WAKE] Fuente de wake-up configurada correctamente");
-}
-
-/*******************************************************************************
- * @brief   Muestra información del wake-up en la pantalla TFT
- ******************************************************************************/
-void showWakeupScreen()
-{
-    tft->fillScreen(TFT_BLACK);
-
-    // Título
-    tft->setTextSize(2);
-    tft->setTextColor(TFT_CYAN, TFT_BLACK);
-    tft->drawString("MOTION DETECTED", 120, 30);
-
-    // Separador
-    tft->drawFastHLine(20, 55, 200, TFT_CYAN);
-
-    // Información
-    tft->setTextSize(1);
-    tft->setTextColor(TFT_WHITE, TFT_BLACK);
-
-    tft->drawString("Wake-up reason:", 120, 80);
-    tft->setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft->drawString(getWakeupReasonString(), 120, 100);
-
-    tft->setTextColor(TFT_WHITE, TFT_BLACK);
-    tft->drawString("Wake-up count:", 120, 130);
-    tft->setTextColor(TFT_GREEN, TFT_BLACK);
-
-    char countStr[32];
-    snprintf(countStr, sizeof(countStr), "#%u", wakeupCount);
-    tft->drawString(countStr, 120, 150);
-
-    // Estado
-    tft->setTextColor(TFT_ORANGE, TFT_BLACK);
-
-    char sleepMsg[64];
-    snprintf(sleepMsg, sizeof(sleepMsg), "Sleep in %u s...", AWAKE_TIME_MS / 1000);
-    tft->drawString(sleepMsg, 120, 190);
-
-    // Footer
-    tft->setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft->drawString("Move wrist to wake up", 120, 225);
-}
-
-/*******************************************************************************
- * @brief   Prepara los periféricos para el bajo consumo antes de dormir
- ******************************************************************************/
-void prepareDeepSleep()
-{
-    Serial.println("[SLEEP] Preparando periféricos para deep sleep...");
-
-    // Apagar pantalla
-    watch->closeBL();
-    watch->displaySleep();
-
-    /*
-     * Apagar periféricos innecesarios via AXP202 (PMU).
-     * Mantener encendido solo lo esencial:
-     *   - LDO1: RTC (siempre encendido)
-     *   - LDO3: Alimentación del BMA423 (NECESARIO para wake-up)
-     *
-     * Apagar:
-     *   - LDO2: Backlight de la pantalla
-     *   - LDO4: Audio
-     *   - DC-DC2: No usado
-     */
-
-    // Apagar backlight
-    power->setPowerOutPut(AXP202_LDO2, false);
-
-    // Apagar audio (si aplica)
-    power->setPowerOutPut(AXP202_LDO4, false);
-
-    // IMPORTANTE: NO apagar LDO3 si el BMA423 lo necesita para la interrupción
-    // En el V3, el BMA423 se alimenta típicamente de LDO3 o directamente del 3V3
-
-    Serial.println("[SLEEP] Periféricos apagados");
-}
-
-/*******************************************************************************
- * @brief   Entra en modo Deep Sleep del ESP32
- ******************************************************************************/
-void enterDeepSleep()
-{
-    Serial.println("[SLEEP] ================================");
-    Serial.println("[SLEEP] Entrando en DEEP SLEEP...");
-    Serial.println("[SLEEP] Mueve el reloj para despertar");
-    Serial.println("[SLEEP] ================================\n");
-    Serial.flush();
-
-    // Preparar periféricos para bajo consumo
-    prepareDeepSleep();
-
-    // Pequeña pausa para asegurar que todo se apagó correctamente
-    delay(50);
-
-    // Entrar en deep sleep
-    esp_deep_sleep_start();
-
-    // ──── Nunca se llega aquí ────
-}
-
-/*******************************************************************************
- * @brief   Retorna la razón del último wake-up como string legible
- * @return  Cadena con la descripción de la razón
- ******************************************************************************/
-const char *getWakeupReasonString()
-{
-    esp_sleep_wakeup_cause_t reason = esp_sleep_get_wakeup_cause();
-
-    switch (reason)
-    {
-        case ESP_SLEEP_WAKEUP_EXT0:
-            return "EXT0 (BMA423 Motion)";
-        case ESP_SLEEP_WAKEUP_EXT1:
-            return "EXT1 (External)";
-        case ESP_SLEEP_WAKEUP_TIMER:
-            return "Timer";
-        case ESP_SLEEP_WAKEUP_TOUCHPAD:
-            return "Touchpad";
-        case ESP_SLEEP_WAKEUP_ULP:
-            return "ULP Coprocessor";
-        case ESP_SLEEP_WAKEUP_UNDEFINED:
-        default:
-            return "Power ON / Reset";
-    }
+    // El flujo es: deep sleep → wake → setup() → deep sleep
+    // Este loop nunca se alcanza
 }
