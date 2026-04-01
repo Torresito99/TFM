@@ -3,11 +3,3 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
-.vscode
-/.pio/
-
-# ML - archivos pesados
-ml/*.zip
-ml/sisfall_raw/
-ml/model/
-ml/dataset/

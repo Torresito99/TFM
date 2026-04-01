@@ -1,19 +1,15 @@
 /*******************************************************************************
  * @file    main.cpp
- * @brief   FallDetector Watch — Sistema de detección de caídas
+ * @brief   FallDetector Watch — Detección de caídas CONTINUA
  *
  * @details Sistema de detección de caídas para LilyGO T-Watch V3 2020.
  *
- *          Flujo principal:
- *            1. Deep sleep continuo (consumo mínimo)
- *            2. BMA423 detecta movimiento brusco → despierta ESP32
- *            3. ESP32 recoge muestras del acelerómetro (~3 segundos)
- *            4. Algoritmo de 3 fases analiza si es una caída real:
- *               - Fase 1: Caída libre (aceleración ~0g)
- *               - Fase 2: Impacto (pico alto de aceleración)
- *               - Fase 3: Post-impacto (cambio orientación + inactividad)
- *            5a. Si es caída → alarma (vibración + sonido + pantalla)
- *            5b. Si no es caída → vuelve a deep sleep inmediatamente
+ *          Flujo principal (modo continuo):
+ *            1. Muestreo continuo del acelerómetro a 50Hz
+ *            2. Buffer circular de 150 muestras (3 segundos)
+ *            3. CNN ejecuta inferencia cada 1 segundo sobre el buffer
+ *            4. Si detecta caída → alarma (vibración + sonido + pantalla)
+ *            5. Pantalla muestra debug en tiempo real
  *
  * @hardware  LilyGO T-Watch V3 2020
  * @sensor    BMA423 (acelerómetro 3 ejes)
@@ -30,105 +26,135 @@
 #include "power_mgmt.h"
 #include <Arduino.h>
 
-/* ─── Buffer de muestras (global para evitar uso excesivo de stack) ─────── */
+/* ─── Buffer de muestras (global) ────────────────────────────────────────── */
 static AccelBuffer accelBuffer;
 
+/* ─── Timers ─────────────────────────────────────────────────────────────── */
+static uint32_t lastSampleTime = 0;
+static uint32_t lastInferenceTime = 0;
+static FallResult lastResult = {};
+
+/* ─── Función de alarma ──────────────────────────────────────────────────── */
+static void runAlarm(const FallResult &result)
+{
+    Serial.println("[MAIN] *** CAÍDA CONFIRMADA — ACTIVANDO ALARMA ***");
+    displayFallDetected(result);
+    delay(1000);
+
+    alarmInit();
+
+    uint32_t alarmStart = millis();
+    bool vibState = false;
+    uint32_t lastVibToggle = 0;
+    bool toneHigh = true;
+    uint32_t lastToneSwitch = 0;
+    uint32_t lastDisplayUpdate = 0;
+
+    while ((millis() - alarmStart) < ALARM_DURATION_MS) {
+        uint32_t now = millis();
+
+        uint32_t vibInterval = vibState ? VIBRATION_ON_MS : VIBRATION_OFF_MS;
+        if ((now - lastVibToggle) >= vibInterval) {
+            vibState = !vibState;
+            if (vibState) {
+                watch->motor->onec();
+            }
+            lastVibToggle = now;
+        }
+
+        if ((now - lastToneSwitch) >= TONE_SWITCH_MS) {
+            uint16_t freq = toneHigh ? ALARM_TONE_HI_HZ : ALARM_TONE_LO_HZ;
+            alarmPlayToneChunk(freq, TONE_SWITCH_MS);
+            toneHigh = !toneHigh;
+            lastToneSwitch = millis();
+        }
+
+        if ((now - lastDisplayUpdate) >= 500) {
+            displayAlarm();
+            lastDisplayUpdate = now;
+        }
+
+        yield();
+    }
+
+    alarmStop();
+    Serial.println("[MAIN] Alarma finalizada");
+
+    // Resetear buffer tras alarma para no re-detectar la misma caída
+    accelBuffer.reset();
+    lastResult = {};
+}
+
 /*******************************************************************************
- * @brief   Flujo principal al despertar
+ * @brief   Inicialización
  ******************************************************************************/
 void setup()
 {
     Serial.begin(115200);
     delay(100);
 
-    wakeupCount++;
-
     Serial.println("\n═══════════════════════════════════════════");
-    Serial.println("  FallDetector Watch — T-Watch V3");
-    Serial.printf("  Wake-up #%u | Razón: %s\n", wakeupCount, powerGetWakeupReasonString());
+    Serial.println("  FallDetector Watch — Modo Continuo");
     Serial.println("═══════════════════════════════════════════");
 
-    // ── Paso 1: Inicializar hardware mínimo (sin pantalla aún) ──
+    // Inicializar hardware completo (con pantalla)
     hardwareInitMinimal();
     accelInit();
-    accelConfigureWakeup();
+    hardwareEnableDisplay();
+    fallDetectionInit();
 
-    // ── Paso 2: Recoger muestras del acelerómetro (SIN pantalla — ahorro de batería) ──
-    Serial.printf("[MAIN] Recogiendo datos durante %u ms...\n", ANALYSIS_WINDOW_MS);
-    accelCollectSamples(accelBuffer, ANALYSIS_WINDOW_MS);
+    // Pantalla inicial
+    tft->fillScreen(TFT_BLACK);
+    tft->setTextSize(2);
+    tft->setTextColor(TFT_CYAN, TFT_BLACK);
+    tft->drawString("Llenando buffer...", 120, 100);
+    tft->setTextSize(1);
+    tft->setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft->drawString("3 segundos", 120, 130);
 
-    // ── Paso 3: Analizar muestras con el algoritmo de detección ──
-    Serial.println("[MAIN] Ejecutando algoritmo de detección de caídas...");
-    FallResult result = fallDetectionAnalyze(accelBuffer);
-    fallDetectionPrintResult(result);
-
-    // ── Paso 4: Actuar según resultado ──
-    if (result.detected) {
-        // ═══ CAÍDA DETECTADA ═══
-        Serial.println("[MAIN] *** CAÍDA CONFIRMADA — ACTIVANDO ALARMA ***");
-
-        // Ahora SÍ encender pantalla — solo cuando hay caída real
-        hardwareEnableDisplay();
-        displayFallDetected(result);
-        delay(1000);  // Mostrar info antes de la alarma visual
-
-        // Iniciar alarma (vibración + sonido)
-        alarmInit();
-
-        // Bucle de alarma con pantalla parpadeante + sonido + vibración
-        uint32_t alarmStart = millis();
-        bool vibState = false;
-        uint32_t lastVibToggle = 0;
-        bool toneHigh = true;
-        uint32_t lastToneSwitch = 0;
-        uint32_t lastDisplayUpdate = 0;
-
-        while ((millis() - alarmStart) < ALARM_DURATION_MS) {
-            uint32_t now = millis();
-
-            // Vibración on/off
-            uint32_t vibInterval = vibState ? VIBRATION_ON_MS : VIBRATION_OFF_MS;
-            if ((now - lastVibToggle) >= vibInterval) {
-                vibState = !vibState;
-                if (vibState) {
-                    watch->motor->onec();
-                }
-                lastVibToggle = now;
-            }
-
-            // Sirena: alternar tono alto/bajo por el speaker
-            if ((now - lastToneSwitch) >= TONE_SWITCH_MS) {
-                uint16_t freq = toneHigh ? ALARM_TONE_HI_HZ : ALARM_TONE_LO_HZ;
-                alarmPlayToneChunk(freq, TONE_SWITCH_MS);
-                toneHigh = !toneHigh;
-                lastToneSwitch = millis();
-            }
-
-            // Actualizar pantalla (parpadeo cada 500ms)
-            if ((now - lastDisplayUpdate) >= 500) {
-                displayAlarm();
-                lastDisplayUpdate = now;
-            }
-
-            yield();
-        }
-
-        alarmStop();
-        Serial.println("[MAIN] Alarma finalizada");
-    } else {
-        // ═══ FALSO POSITIVO — No es caída ═══
-        Serial.println("[MAIN] No es caída — volviendo a dormir silenciosamente");
-    }
-
-    // ── Paso 5: Volver a deep sleep ──
-    powerEnterDeepSleep();
+    // Resetear buffer
+    accelBuffer.reset();
+    lastSampleTime = millis();
+    lastInferenceTime = millis();
 }
 
 /*******************************************************************************
- * @brief   Loop — no se ejecuta en este diseño
+ * @brief   Bucle principal — muestreo + inferencia continua
  ******************************************************************************/
 void loop()
 {
-    // El flujo es: deep sleep → wake → setup() → deep sleep
-    // Este loop nunca se alcanza
+    uint32_t now = millis();
+
+    // ── Muestrear a 50Hz (cada 20ms) ──
+    if ((now - lastSampleTime) >= SAMPLE_PERIOD_MS) {
+        AccelSample s = accelReadSample();
+        accelBuffer.push(s);
+        lastSampleTime = now;
+
+        // Imprimir valores RAW cada 500ms para diagnóstico
+        static uint32_t lastRawPrint = 0;
+        if ((now - lastRawPrint) >= 500) {
+            Serial.printf("[RAW] x=%.3f y=%.3f z=%.3f mag=%.3f g\n",
+                          s.x, s.y, s.z, s.magnitude);
+            lastRawPrint = now;
+        }
+    }
+
+    // ── Ejecutar CNN cada 1 segundo (si tenemos suficientes muestras) ──
+    if ((now - lastInferenceTime) >= INFERENCE_INTERVAL_MS
+        && accelBuffer.count >= MODEL_WINDOW_SAMPLES)
+    {
+        lastResult = fallDetectionAnalyze(accelBuffer);
+        fallDetectionPrintResult(lastResult);
+
+        displayDebug(lastResult);
+
+        if (lastResult.detected) {
+            runAlarm(lastResult);
+        }
+
+        lastInferenceTime = millis();
+    }
+
+    yield();
 }

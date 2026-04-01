@@ -18,14 +18,16 @@ static constexpr uint8_t  BMA423_INT_PIN   = 39;
 static constexpr uint8_t  BACKLIGHT_LEVEL  = 128;   // 0-255
 
 /* ─── Acelerómetro ────────────────────────────────────────────────────────── */
-static constexpr uint16_t ACCEL_SAMPLE_RATE_HZ = 200;
-static constexpr uint16_t SAMPLE_PERIOD_MS     = 1000 / ACCEL_SAMPLE_RATE_HZ;
-static constexpr uint16_t ANALYSIS_WINDOW_MS   = 3000;  // Ventana de análisis post-wake
-static constexpr uint16_t MAX_SAMPLES          = ANALYSIS_WINDOW_MS / SAMPLE_PERIOD_MS;
+static constexpr uint16_t ACCEL_SAMPLE_RATE_HZ = 50;    // 50Hz = igual que datos de entrenamiento
+static constexpr uint16_t SAMPLE_PERIOD_MS     = 1000 / ACCEL_SAMPLE_RATE_HZ;  // 20ms
+static constexpr uint16_t MODEL_WINDOW_SAMPLES = 150;   // 150 muestras = 3s @ 50Hz
+static constexpr uint16_t MAX_SAMPLES          = MODEL_WINDOW_SAMPLES;
+static constexpr uint16_t INFERENCE_INTERVAL_MS = 1000;  // Ejecutar CNN cada 1 segundo
+static constexpr uint16_t ANALYSIS_WINDOW_MS   = 3000;  // Mantener por compatibilidad
 
-// Factor de conversión LSB → g (BMA423 ±4g rango por defecto, 12-bit left-justified a 16-bit)
-// Con ±4g: 1g ≈ 8192 LSB.  Ajustar si se cambia el rango.
-static constexpr float    ACCEL_LSB_TO_G       = 1.0f / 8192.0f;
+// Factor de conversión LSB → g (BMA423 configurado a ±4g, 12-bit)
+// ±4g con 12-bit: 1g = 512 LSB
+static constexpr float    ACCEL_LSB_TO_G       = 1.0f / 512.0f;
 
 /* ─── Umbrales de detección de caída (3 fases) ────────────────────────────── */
 

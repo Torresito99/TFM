@@ -15,6 +15,14 @@ void accelInit()
     bma->attachInterrupt();
     bma->enableAccel();
 
+    // Configurar rango ±4g (caídas pueden superar 2g)
+    Acfg cfg;
+    cfg.odr = BMA4_OUTPUT_DATA_RATE_100HZ;
+    cfg.range = BMA4_ACCEL_RANGE_4G;
+    cfg.bandwidth = BMA4_ACCEL_NORMAL_AVG4;
+    cfg.perf_mode = BMA4_CIC_AVG_MODE;
+    bma->accelConfig(cfg);
+
     // Activar feature de wakeup (any-motion) para despertar del deep sleep
     bma->enableFeature(BMA423_WAKEUP, true);
 
@@ -42,6 +50,18 @@ AccelSample accelReadSample()
 {
     Accel raw;
     bma->getAccel(raw);
+
+    // Debug: imprimir valores RAW una vez al inicio
+    static bool rawPrinted = false;
+    if (!rawPrinted) {
+        Serial.printf("[ACCEL-RAW] raw.x=%d  raw.y=%d  raw.z=%d\n", raw.x, raw.y, raw.z);
+        Serial.printf("[ACCEL-RAW] Conversión actual: * %.8f = x:%.4f y:%.4f z:%.4f g\n",
+                      ACCEL_LSB_TO_G,
+                      raw.x * ACCEL_LSB_TO_G,
+                      raw.y * ACCEL_LSB_TO_G,
+                      raw.z * ACCEL_LSB_TO_G);
+        rawPrinted = true;
+    }
 
     AccelSample s;
     s.x = raw.x * ACCEL_LSB_TO_G;

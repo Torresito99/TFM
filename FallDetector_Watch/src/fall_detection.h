@@ -1,45 +1,30 @@
 /*******************************************************************************
  * @file    fall_detection.h
- * @brief   Algoritmo de detección de caídas — 3 fases + puntuación ponderada
+ * @brief   Detección de caídas mediante CNN 1D + filtro físico (TFLite Micro)
  *
- * @details Algoritmo basado en literatura científica de detección de caídas:
- *
- *   Fase 1 — CAÍDA LIBRE: Magnitud de aceleración cercana a 0g durante un
- *            período mínimo (indica cuerpo en caída libre).
- *
- *   Fase 2 — IMPACTO: Pico alto de aceleración (>3g) que ocurre tras la
- *            caída libre (indica impacto contra el suelo).
- *
- *   Fase 3 — POST-IMPACTO: Cambio de orientación respecto a la posición
- *            previa + inactividad prolongada (persona tumbada e inmóvil).
- *
- *   Cada fase contribuye una puntuación parcial. Si la suma supera el
- *   umbral FALL_SCORE_THRESHOLD se confirma la caída.
+ * @details V2: CNN normalizada + filtro de caída libre.
+ *          El modelo recibe ventanas normalizadas (media=0, std=1 por eje).
+ *          Además exige una fase de caída libre para confirmar.
  ******************************************************************************/
 #pragma once
 
 #include "accelerometer.h"
 #include <cstdint>
 
-/// Resultado detallado del análisis de caída
+/// Resultado del análisis de caída
 struct FallResult {
-    bool     detected;            // true si se confirma caída
-    uint8_t  score;               // Puntuación total (0-100)
-
-    // Métricas individuales
-    float    peakG;               // Pico máximo de aceleración (g)
-    float    minG;                // Mínimo de aceleración (caída libre) (g)
-    float    orientationChangeDeg;// Cambio de orientación (grados)
-    float    postImpactStdDev;    // Desviación estándar post-impacto (g)
-
-    // Puntuaciones parciales
-    uint8_t  scoreImpact;
-    uint8_t  scoreFreefall;
-    uint8_t  scoreOrientation;
-    uint8_t  scoreInactivity;
+    bool     detected;          // true si se confirma caída (CNN + filtro físico)
+    float    probability;       // Probabilidad CNN (0.0 - 1.0)
+    float    peakG;             // Pico máximo de aceleración (g)
+    float    minG;              // Mínimo de aceleración (g)
+    bool     freefallDetected;  // true si se detectó fase de caída libre
+    uint32_t inferenceTimeMs;   // Tiempo de inferencia (ms)
 };
 
-/// Analiza el buffer de muestras y devuelve el resultado de detección
+/// Inicializa el intérprete TFLite (llamar una vez al arrancar)
+bool fallDetectionInit();
+
+/// Analiza el buffer con la red neuronal y devuelve el resultado
 FallResult fallDetectionAnalyze(const AccelBuffer &buf);
 
 /// Imprime el resultado del análisis por Serial (debug)
