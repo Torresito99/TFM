@@ -13,11 +13,14 @@
 
 /// Resultado del análisis de caída
 struct FallResult {
-    bool     detected;          // true si se confirma caída (CNN + filtro físico)
+    bool     detected;          // true si se confirma caída (score >= umbral)
     float    probability;       // Probabilidad CNN (0.0 - 1.0)
     float    peakG;             // Pico máximo de aceleración (g)
     float    minG;              // Mínimo de aceleración (g)
     bool     freefallDetected;  // true si se detectó fase de caída libre
+    bool     impactAfterFF;     // true si hay impacto > 2g DESPUÉS de caída libre
+    bool     orientationChange; // true si orientación cambió > 40°
+    uint8_t  score;             // Puntuación total (0-100)
     uint32_t inferenceTimeMs;   // Tiempo de inferencia (ms)
 };
 

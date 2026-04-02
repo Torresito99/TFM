@@ -42,72 +42,147 @@ void displayFallDetected(const FallResult &result)
     tft->drawString("Vibracion + sonido activos", 120, 220);
 }
 
+bool displayConfirmation(uint32_t timeout_ms)
+{
+    uint32_t start = millis();
+    int16_t tx, ty;
+    uint32_t lastSecond = 0xFFFF;  // forzar primer dibujo
+
+    // Ignorar toques residuales: esperar a que se suelte la pantalla
+    while (watch->getTouch(tx, ty)) {
+        delay(50);
+        if ((millis() - start) > 1000) break;  // máximo 1s esperando
+    }
+
+    // Vibración para avisar
+    watch->motor->onec();
+
+    // Dibujar partes fijas una sola vez
+    tft->fillScreen(TFT_BLACK);
+
+    // Cabecera roja
+    tft->fillRect(0, 0, 240, 45, TFT_RED);
+    tft->setTextSize(2);
+    tft->setTextColor(TFT_WHITE, TFT_RED);
+    tft->drawString("CAIDA DETECTADA", 120, 22);
+
+    tft->setTextSize(1);
+    tft->setTextColor(TFT_WHITE, TFT_BLACK);
+    tft->drawString("Alarma en segundos...", 120, 115);
+
+    // Botón verde grande
+    tft->fillRoundRect(30, 150, 180, 55, 10, TFT_GREEN);
+    tft->setTextSize(2);
+    tft->setTextColor(TFT_BLACK, TFT_GREEN);
+    tft->drawString("ESTOY BIEN", 120, 177);
+
+    tft->setTextSize(1);
+    tft->setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft->drawString("Toca para cancelar", 120, 225);
+
+    while ((millis() - start) < timeout_ms) {
+        uint32_t elapsed = millis() - start;
+        uint32_t remaining = (timeout_ms - elapsed) / 1000 + 1;
+
+        // Solo redibujar el número cuando cambia el segundo
+        if (remaining != lastSecond) {
+            lastSecond = remaining;
+
+            // Borrar zona del número y redibujar
+            tft->fillRect(60, 55, 120, 50, TFT_BLACK);
+            tft->setTextSize(4);
+            tft->setTextColor(TFT_RED, TFT_BLACK);
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%lu", remaining);
+            tft->drawString(buf, 120, 80);
+
+            // Vibración cada segundo
+            watch->motor->onec();
+        }
+
+        // Comprobar touch — solo después de 500ms (evitar falsos por vibración)
+        if (elapsed > 500 && watch->getTouch(tx, ty)) {
+            // Cualquier toque en la pantalla cancela (el botón es grande)
+            tft->fillScreen(TFT_BLACK);
+            tft->setTextSize(2);
+            tft->setTextColor(TFT_GREEN, TFT_BLACK);
+            tft->drawString("Cancelado", 120, 120);
+            delay(1500);
+            return true;  // usuario canceló
+        }
+
+        delay(50);
+    }
+
+    return false;  // tiempo agotado → activar alarma
+}
+
 void displayDebug(const FallResult &result)
 {
     tft->fillScreen(TFT_BLACK);
+    char buf[48];
 
     // Cabecera — verde si OK, rojo si caída
-    uint16_t headerColor = result.detected ? TFT_RED : 0x0400;  // verde oscuro
-    tft->fillRect(0, 0, 240, 40, headerColor);
+    uint16_t headerColor = result.detected ? TFT_RED : 0x0400;
+    tft->fillRect(0, 0, 240, 35, headerColor);
     tft->setTextSize(2);
     tft->setTextColor(TFT_WHITE, headerColor);
-    tft->drawString(result.detected ? "CAIDA!" : "OK - Sin caida", 120, 20);
+    tft->drawString(result.detected ? "CAIDA!" : "OK", 120, 17);
 
-    // Probabilidad CNN (grande)
-    tft->setTextSize(1);
-    tft->setTextColor(TFT_CYAN, TFT_BLACK);
-    tft->drawString("Probabilidad CNN:", 120, 55);
-
+    // ── Score grande ──
     tft->setTextSize(3);
-    uint16_t probColor = TFT_GREEN;
-    if (result.probability > 0.3f) probColor = TFT_YELLOW;
-    if (result.probability > 0.6f) probColor = TFT_RED;
-    tft->setTextColor(probColor, TFT_BLACK);
+    uint16_t scoreColor = TFT_GREEN;
+    if (result.score > 30) scoreColor = TFT_YELLOW;
+    if (result.score >= 60) scoreColor = TFT_RED;
+    tft->setTextColor(scoreColor, TFT_BLACK);
+    snprintf(buf, sizeof(buf), "%u/60", result.score);
+    tft->drawString(buf, 120, 58);
 
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%.0f%%", result.probability * 100.0f);
-    tft->drawString(buf, 120, 85);
-
-    // Umbral
+    // ── 4 criterios con indicadores ──
     tft->setTextSize(1);
-    tft->setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft->drawString("Umbral: 60%", 120, 115);
+    int y = 88;
 
-    // Caída libre: indicador visual clave
-    tft->setTextSize(1);
-    uint16_t ffColor = result.freefallDetected ? TFT_GREEN : TFT_DARKGREY;
-    tft->setTextColor(ffColor, TFT_BLACK);
-    snprintf(buf, sizeof(buf), "Caida libre: %s", result.freefallDetected ? "SI" : "NO");
-    tft->drawString(buf, 120, 130);
+    // CNN
+    uint8_t cnnPts = (uint8_t)(result.probability * 40);
+    tft->setTextColor(cnnPts > 0 ? TFT_CYAN : TFT_DARKGREY, TFT_BLACK);
+    snprintf(buf, sizeof(buf), "CNN %.0f%%          %2u pts", result.probability * 100.0f, cnnPts);
+    tft->drawString(buf, 120, y); y += 18;
 
-    // Línea separadora
-    tft->drawFastHLine(20, 143, 200, TFT_DARKGREY);
+    // Freefall
+    uint8_t ffPts = result.freefallDetected ? (result.minG < 0.5f ? 20 : 10) : 0;
+    tft->setTextColor(ffPts > 0 ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK);
+    snprintf(buf, sizeof(buf), "Caida libre %s    %2u pts", result.freefallDetected ? "SI" : "NO", ffPts);
+    tft->drawString(buf, 120, y); y += 18;
 
-    // Datos de aceleración
+    // Impact after freefall
+    uint8_t impPts = result.impactAfterFF ? 25 : (result.peakG > 2.0f ? 10 : 0);
+    tft->setTextColor(impPts > 0 ? TFT_ORANGE : TFT_DARKGREY, TFT_BLACK);
+    snprintf(buf, sizeof(buf), "Impacto→FF  %s    %2u pts", result.impactAfterFF ? "SI" : "NO", impPts);
+    tft->drawString(buf, 120, y); y += 18;
+
+    // Orientation
+    uint8_t oriPts = result.orientationChange ? 15 : 0;
+    tft->setTextColor(oriPts > 0 ? TFT_MAGENTA : TFT_DARKGREY, TFT_BLACK);
+    snprintf(buf, sizeof(buf), "Orientacion %s    %2u pts", result.orientationChange ? "SI" : "NO", oriPts);
+    tft->drawString(buf, 120, y); y += 18;
+
+    // ── Separador ──
+    tft->drawFastHLine(20, y, 200, TFT_DARKGREY); y += 8;
+
+    // ── Datos aceleración ──
     tft->setTextColor(TFT_WHITE, TFT_BLACK);
-    tft->setTextSize(1);
+    snprintf(buf, sizeof(buf), "Peak:%.1fg  Min:%.2fg  %lums", result.peakG, result.minG, result.inferenceTimeMs);
+    tft->drawString(buf, 120, y); y += 16;
 
-    snprintf(buf, sizeof(buf), "Pico:  %.2f g", result.peakG);
-    tft->drawString(buf, 120, 155);
-
-    snprintf(buf, sizeof(buf), "Min:   %.2f g", result.minG);
-    tft->drawString(buf, 120, 172);
-
-    snprintf(buf, sizeof(buf), "Inferencia: %lu ms", result.inferenceTimeMs);
-    tft->drawString(buf, 120, 189);
-
-    // Barra visual de probabilidad
-    tft->drawRect(20, 205, 200, 16, TFT_WHITE);
-    int barWidth = (int)(result.probability * 198);
+    // ── Barra de score visual ──
+    tft->drawRect(20, y, 200, 14, TFT_WHITE);
+    int barWidth = min(198, (int)(result.score * 198 / 100));
     if (barWidth > 0) {
-        tft->fillRect(21, 206, barWidth, 14, probColor);
+        tft->fillRect(21, y + 1, barWidth, 12, scoreColor);
     }
     // Marca del umbral (60%)
-    int threshX = 20 + (int)(0.6f * 200);
-    tft->drawFastVLine(threshX, 203, 20, TFT_WHITE);
-
-    tft->setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft->drawString("0%       60%       100%", 120, 230);
+    int threshX = 20 + (int)(60.0f / 100.0f * 200);
+    tft->drawFastVLine(threshX, y - 2, 18, TFT_WHITE);
 }
 
 void displayAlarm()

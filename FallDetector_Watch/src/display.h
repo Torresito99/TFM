@@ -9,6 +9,10 @@
 /// Muestra pantalla de caída detectada con los datos del análisis
 void displayFallDetected(const FallResult &result);
 
+/// Muestra pantalla de confirmación con cuenta atrás.
+/// Devuelve true si el usuario canceló (tocó el botón), false si expiró el tiempo.
+bool displayConfirmation(uint32_t timeout_ms);
+
 /// Muestra pantalla de alarma activa
 void displayAlarm();
 

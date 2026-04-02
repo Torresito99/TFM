@@ -48,15 +48,9 @@ static constexpr float    INACTIVITY_THRESHOLD_G     = 0.25f;  // Desviación es
 static constexpr uint16_t POST_IMPACT_WINDOW_SAMPLES = 200;    // ~1s de datos post-impacto
 
 /* ─── Sistema de puntuación ───────────────────────────────────────────────── */
-// IMPORTANTE: La caída libre es OBLIGATORIA para dar puntos de impacto completos.
-// Sin caída libre previa, el impacto solo aporta puntos parciales (SCORE_IMPACT_NO_FF).
-// Esto evita que movimientos bruscos normales (saludo, gesto) disparen la alarma.
-static constexpr uint8_t  SCORE_FREEFALL     = 30;   // Puntos por detectar caída libre
-static constexpr uint8_t  SCORE_IMPACT       = 30;   // Puntos por impacto CON caída libre previa
-static constexpr uint8_t  SCORE_IMPACT_NO_FF = 10;   // Puntos por impacto SIN caída libre (penalizado)
-static constexpr uint8_t  SCORE_ORIENTATION  = 25;   // Puntos por cambio de orientación
-static constexpr uint8_t  SCORE_INACTIVITY   = 15;   // Puntos por inactividad post-impacto
-static constexpr uint8_t  FALL_SCORE_THRESHOLD = 70;  // Score mínimo para confirmar caída
+// Los pesos del scoring están definidos en fall_detection.cpp
+// CNN(40) + Freefall(20) + Impacto→FF(25) + Orientación(15) = 100 pts max
+// Umbral de detección: 60 pts
 
 /* ─── Alarma ──────────────────────────────────────────────────────────────── */
 static constexpr uint32_t ALARM_DURATION_MS   = 15000;  // Duración total de alarma (15s)

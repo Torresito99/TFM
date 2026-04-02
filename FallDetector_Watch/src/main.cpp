@@ -99,6 +99,7 @@ void setup()
 
     // Inicializar hardware completo (con pantalla)
     hardwareInitMinimal();
+    watch->motor_begin();  // Motor necesario para vibración en confirmación
     accelInit();
     hardwareEnableDisplay();
     fallDetectionInit();
@@ -150,7 +151,16 @@ void loop()
         displayDebug(lastResult);
 
         if (lastResult.detected) {
-            runAlarm(lastResult);
+            // Fase de confirmación: 10 segundos para cancelar
+            Serial.println("[MAIN] Caída detectada — esperando confirmación...");
+            bool cancelled = displayConfirmation(10000);
+            if (cancelled) {
+                Serial.println("[MAIN] Alarma cancelada por el usuario");
+                accelBuffer.reset();
+                lastResult = {};
+            } else {
+                runAlarm(lastResult);
+            }
         }
 
         lastInferenceTime = millis();
