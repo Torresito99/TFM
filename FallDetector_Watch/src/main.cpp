@@ -1,64 +1,73 @@
-/*******************************************************************************
- * @file    main.cpp
- * @brief   FallDetector Watch — Detección de caídas CONTINUA
- *
- * @details Sistema de detección de caídas para LilyGO T-Watch V3 2020.
- *
- *          Flujo principal (modo continuo):
- *            1. Muestreo continuo del acelerómetro a 50Hz
- *            2. Buffer circular de 150 muestras (3 segundos)
- *            3. CNN ejecuta inferencia cada 1 segundo sobre el buffer
- *            4. Si detecta caída → alarma (vibración + sonido + pantalla)
- *            5. Pantalla muestra debug en tiempo real
- *
- * @hardware  LilyGO T-Watch V3 2020
- * @sensor    BMA423 (acelerómetro 3 ejes)
- * @author    Torres
- * @date      2025
- ******************************************************************************/
-
 #include "config.h"
 #include "hardware.h"
 #include "accelerometer.h"
 #include "fall_detection.h"
 #include "alarm.h"
 #include "display.h"
-#include "power_mgmt.h"
+#include "mqtt_client.h"
 #include <Arduino.h>
+#include <esp32-hal-cpu.h>
 
-/* ─── Buffer de muestras (global) ────────────────────────────────────────── */
+static constexpr uint32_t CPU_FREQ_NORMAL_MHZ = 80;
+static constexpr uint32_t CPU_FREQ_ALARM_MHZ  = 240;
+static constexpr uint32_t BATTERY_REPORT_MS   = 5UL * 60UL * 1000UL;  // 5 min
+
 static AccelBuffer accelBuffer;
-
-/* ─── Timers ─────────────────────────────────────────────────────────────── */
-static uint32_t lastSampleTime = 0;
+static uint32_t lastSampleTime    = 0;
 static uint32_t lastInferenceTime = 0;
+static uint32_t lastBatteryReport = 0;
 static FallResult lastResult = {};
 
-/* ─── Función de alarma ──────────────────────────────────────────────────── */
-static void runAlarm(const FallResult &result)
+static void screenOff()
 {
-    Serial.println("[MAIN] *** CAÍDA CONFIRMADA — ACTIVANDO ALARMA ***");
+    watch->closeBL();
+    watch->displaySleep();
+    power->setPowerOutPut(AXP202_LDO2, false);
+    power->setPowerOutPut(AXP202_LDO4, false);
+}
+
+// Tras displayWakeup hay que volver a fijar el datum, si no los textos
+// centrados se dibujan desde la esquina y la pantalla queda descuadrada
+static void screenOn()
+{
+    power->setPowerOutPut(AXP202_LDO2, true);
+    watch->displayWakeup();
+    watch->openBL();
+    watch->bl->adjust(BACKLIGHT_LEVEL);
+    tft->setTextDatum(MC_DATUM);
+    tft->setTextColor(TFT_WHITE, TFT_BLACK);
+    tft->fillScreen(TFT_BLACK);
+}
+
+static void runAlarmUntilTouch(const FallResult &result)
+{
+    Serial.println("[MAIN] Alarma activada");
+    setCpuFrequencyMhz(CPU_FREQ_ALARM_MHZ);
+
     displayFallDetected(result);
     delay(1000);
 
     alarmInit();
 
-    uint32_t alarmStart = millis();
     bool vibState = false;
     uint32_t lastVibToggle = 0;
     bool toneHigh = true;
     uint32_t lastToneSwitch = 0;
     uint32_t lastDisplayUpdate = 0;
+    int16_t tx, ty;
 
-    while ((millis() - alarmStart) < ALARM_DURATION_MS) {
+    uint32_t flushStart = millis();
+    while (watch->getTouch(tx, ty) && (millis() - flushStart) < 1000) {
+        delay(50);
+    }
+
+    while (true) {
         uint32_t now = millis();
 
         uint32_t vibInterval = vibState ? VIBRATION_ON_MS : VIBRATION_OFF_MS;
         if ((now - lastVibToggle) >= vibInterval) {
             vibState = !vibState;
-            if (vibState) {
-                watch->motor->onec();
-            }
+            if (vibState) watch->motor->onec();
             lastVibToggle = now;
         }
 
@@ -74,96 +83,103 @@ static void runAlarm(const FallResult &result)
             lastDisplayUpdate = now;
         }
 
+        if (watch->getTouch(tx, ty)) {
+            Serial.println("[MAIN] Detenida por el usuario");
+            break;
+        }
+
         yield();
     }
 
     alarmStop();
-    Serial.println("[MAIN] Alarma finalizada");
 
-    // Resetear buffer tras alarma para no re-detectar la misma caída
-    accelBuffer.reset();
-    lastResult = {};
+    tft->fillScreen(TFT_BLACK);
+    tft->setTextSize(2);
+    tft->setTextColor(TFT_GREEN, TFT_BLACK);
+    tft->drawString("Alarma detenida", 120, 110);
+    delay(1500);
+
+    setCpuFrequencyMhz(CPU_FREQ_NORMAL_MHZ);
 }
 
-/*******************************************************************************
- * @brief   Inicialización
- ******************************************************************************/
+static void reportBattery()
+{
+    uint8_t  pct      = power->getBattPercentage();
+    uint16_t voltage  = power->getBattVoltage();
+    bool     charging = power->isChargeing();
+
+    Serial.printf("[BAT] %u%% %umV %s\n", pct, voltage, charging ? "(cargando)" : "");
+    mqttPublishBattery(pct, voltage, charging);
+}
+
 void setup()
 {
     Serial.begin(115200);
     delay(100);
 
-    Serial.println("\n═══════════════════════════════════════════");
-    Serial.println("  FallDetector Watch — Modo Continuo");
-    Serial.println("═══════════════════════════════════════════");
+    Serial.println("\nFallDetector Watch");
 
-    // Inicializar hardware completo (con pantalla)
     hardwareInitMinimal();
-    watch->motor_begin();  // Motor necesario para vibración en confirmación
+    watch->motor_begin();
     accelInit();
-    hardwareEnableDisplay();
     fallDetectionInit();
 
-    // Pantalla inicial
-    tft->fillScreen(TFT_BLACK);
-    tft->setTextSize(2);
-    tft->setTextColor(TFT_CYAN, TFT_BLACK);
-    tft->drawString("Llenando buffer...", 120, 100);
-    tft->setTextSize(1);
-    tft->setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft->drawString("3 segundos", 120, 130);
+    screenOff();
+    setCpuFrequencyMhz(CPU_FREQ_NORMAL_MHZ);
 
-    // Resetear buffer
     accelBuffer.reset();
-    lastSampleTime = millis();
+    lastSampleTime    = millis();
     lastInferenceTime = millis();
+    lastBatteryReport = millis();
 }
 
-/*******************************************************************************
- * @brief   Bucle principal — muestreo + inferencia continua
- ******************************************************************************/
 void loop()
 {
     uint32_t now = millis();
 
-    // ── Muestrear a 50Hz (cada 20ms) ──
     if ((now - lastSampleTime) >= SAMPLE_PERIOD_MS) {
         AccelSample s = accelReadSample();
         accelBuffer.push(s);
         lastSampleTime = now;
-
-        // Imprimir valores RAW cada 500ms para diagnóstico
-        static uint32_t lastRawPrint = 0;
-        if ((now - lastRawPrint) >= 500) {
-            Serial.printf("[RAW] x=%.3f y=%.3f z=%.3f mag=%.3f g\n",
-                          s.x, s.y, s.z, s.magnitude);
-            lastRawPrint = now;
-        }
     }
 
-    // ── Ejecutar CNN cada 1 segundo (si tenemos suficientes muestras) ──
     if ((now - lastInferenceTime) >= INFERENCE_INTERVAL_MS
         && accelBuffer.count >= MODEL_WINDOW_SAMPLES)
     {
         lastResult = fallDetectionAnalyze(accelBuffer);
         fallDetectionPrintResult(lastResult);
-
-        displayDebug(lastResult);
+        lastInferenceTime = millis();
 
         if (lastResult.detected) {
-            // Fase de confirmación: 10 segundos para cancelar
-            Serial.println("[MAIN] Caída detectada — esperando confirmación...");
+            Serial.println("[MAIN] Caida detectada");
+            screenOn();
             bool cancelled = displayConfirmation(10000);
-            if (cancelled) {
-                Serial.println("[MAIN] Alarma cancelada por el usuario");
-                accelBuffer.reset();
-                lastResult = {};
-            } else {
-                runAlarm(lastResult);
-            }
-        }
 
-        lastInferenceTime = millis();
+            if (cancelled) {
+                Serial.println("[MAIN] Cancelado");
+            } else {
+                // Aviso a Home Assistant antes de la alarma local
+                setCpuFrequencyMhz(CPU_FREQ_ALARM_MHZ);
+                mqttPublishFall();
+                runAlarmUntilTouch(lastResult);
+            }
+
+            screenOff();
+            accelBuffer.reset();
+            lastResult = {};
+            lastSampleTime    = millis();
+            lastInferenceTime = millis();
+        }
+    }
+
+    static bool firstReportDone = false;
+    uint32_t reportInterval = firstReportDone ? BATTERY_REPORT_MS : 5000;
+    if ((now - lastBatteryReport) >= reportInterval) {
+        firstReportDone = true;
+        setCpuFrequencyMhz(CPU_FREQ_ALARM_MHZ);
+        reportBattery();
+        setCpuFrequencyMhz(CPU_FREQ_NORMAL_MHZ);
+        lastBatteryReport = millis();
     }
 
     yield();

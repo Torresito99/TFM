@@ -6,6 +6,9 @@
 .vscode
 /.pio/
 
+# Credenciales WiFi y MQTT
+src/secrets.h
+
 # ML - archivos pesados
 ml/*.zip
 ml/sisfall_raw/
