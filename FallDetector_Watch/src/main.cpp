@@ -10,7 +10,7 @@
 
 static constexpr uint32_t CPU_FREQ_NORMAL_MHZ = 80;
 static constexpr uint32_t CPU_FREQ_ALARM_MHZ  = 240;
-static constexpr uint32_t BATTERY_REPORT_MS   = 5UL * 60UL * 1000UL;  // 5 min
+static constexpr uint32_t BATTERY_REPORT_MS   = 60UL * 60UL * 1000UL;  // 1 hora
 
 static AccelBuffer accelBuffer;
 static uint32_t lastSampleTime    = 0;
@@ -172,10 +172,16 @@ void loop()
         }
     }
 
-    static bool firstReportDone = false;
+    /*static bool firstReportDone = false;
     uint32_t reportInterval = firstReportDone ? BATTERY_REPORT_MS : 5000;
     if ((now - lastBatteryReport) >= reportInterval) {
         firstReportDone = true;
+        setCpuFrequencyMhz(CPU_FREQ_ALARM_MHZ);
+        reportBattery();
+        setCpuFrequencyMhz(CPU_FREQ_NORMAL_MHZ);
+        lastBatteryReport = millis();
+    }*/
+    if ((now - lastBatteryReport) >= BATTERY_REPORT_MS) {
         setCpuFrequencyMhz(CPU_FREQ_ALARM_MHZ);
         reportBattery();
         setCpuFrequencyMhz(CPU_FREQ_NORMAL_MHZ);
