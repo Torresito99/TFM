@@ -124,6 +124,9 @@ void setup()
     accelInit();
     fallDetectionInit();
 
+    // WiFi siempre ON con modem sleep (ahorro ~60-70% radio)
+    mqttInit();
+
     screenOff();
     setCpuFrequencyMhz(CPU_FREQ_NORMAL_MHZ);
 
@@ -158,8 +161,7 @@ void loop()
             if (cancelled) {
                 Serial.println("[MAIN] Cancelado");
             } else {
-                // Aviso a Home Assistant antes de la alarma local
-                setCpuFrequencyMhz(CPU_FREQ_ALARM_MHZ);
+                // Encolar aviso a Home Assistant (no bloquea)
                 mqttPublishFall();
                 runAlarmUntilTouch(lastResult);
             }
@@ -172,21 +174,13 @@ void loop()
         }
     }
 
-    /*static bool firstReportDone = false;
-    uint32_t reportInterval = firstReportDone ? BATTERY_REPORT_MS : 5000;
-    if ((now - lastBatteryReport) >= reportInterval) {
-        firstReportDone = true;
-        setCpuFrequencyMhz(CPU_FREQ_ALARM_MHZ);
-        reportBattery();
-        setCpuFrequencyMhz(CPU_FREQ_NORMAL_MHZ);
-        lastBatteryReport = millis();
-    }*/
     if ((now - lastBatteryReport) >= BATTERY_REPORT_MS) {
-        setCpuFrequencyMhz(CPU_FREQ_ALARM_MHZ);
         reportBattery();
-        setCpuFrequencyMhz(CPU_FREQ_NORMAL_MHZ);
         lastBatteryReport = millis();
     }
+
+    // Gestionar WiFi/MQTT sin bloquear (reconexiones + cola)
+    mqttLoop();
 
     yield();
 }
