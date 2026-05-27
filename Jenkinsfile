@@ -15,7 +15,7 @@ pipeline {
             steps {
                 echo 'Lanzando tests...'
                 // Cambia a "exit 1" para simular fallo
-                sh 'exit 1'
+                sh 'exit 0'
             }
         }
     }
