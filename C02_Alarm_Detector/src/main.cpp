@@ -4,8 +4,15 @@
 #include <Adafruit_BME680.h>
 #include "config.h"
 #include "alarms.h"
+#include "ble_listener.h"   // escucha la baliza BLE de caida del reloj
+#include "ha_notify.h"      // avisa a Home Assistant por MQTT (misma señal)
 
 Adafruit_BME680 bme;
+bool bmeOk = false;   // false si el sensor no esta conectado (el gateway sigue)
+
+// Deteccion por flanco de la baliza de caida: solo avisamos UNA vez por
+// episodio (cuando la baliza aparece tras estar ausente).
+bool fallBeaconPrev = false;
 
 // Referencia de gas en aire limpio (se calibra en los primeros minutos)
 float gasBaseline = 0;
@@ -173,31 +180,53 @@ void setup() {
     Serial.begin(115200);
     while (!Serial) delay(10);
 
-    Serial.println("=== CO2 Alarm Detector - BME680 + T-Energy S3 ===");
+    Serial.println("=== Gateway Alarma: BME680 + baliza BLE caida -> Home Assistant ===");
 
     Wire.begin(I2C_SDA, I2C_SCL);
 
-    if (!bme.begin(0x77, &Wire) && !bme.begin(0x76, &Wire)) {
-        Serial.println("[ERROR] No se encontro el sensor BME680.");
-        Serial.printf("        SDA -> GPIO%d, SCL -> GPIO%d\n", I2C_SDA, I2C_SCL);
-        while (1) delay(1000);
+    bmeOk = bme.begin(0x77, &Wire) || bme.begin(0x76, &Wire);
+    if (bmeOk) {
+        Serial.println("[OK] Sensor BME680 detectado.");
+        bme.setTemperatureOversampling(BME680_OS_8X);
+        bme.setHumidityOversampling(BME680_OS_2X);
+        bme.setPressureOversampling(BME680_OS_4X);
+        bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
+        bme.setGasHeater(320, 150);
+        Serial.println("[OK] Sensor configurado. Iniciando lecturas...\n");
+    } else {
+        // No es fatal: la alarma de caida (BLE -> Home Assistant) es la
+        // prioridad y debe funcionar aunque el BME680 no este conectado.
+        Serial.println("[AVISO] No se encontro el BME680: se continua SIN medidas de ambiente.");
+        Serial.printf("        Revisa el cableado: SDA -> GPIO%d, SCL -> GPIO%d\n", I2C_SDA, I2C_SCL);
     }
 
-    Serial.println("[OK] Sensor BME680 detectado.");
-
-    bme.setTemperatureOversampling(BME680_OS_8X);
-    bme.setHumidityOversampling(BME680_OS_2X);
-    bme.setPressureOversampling(BME680_OS_4X);
-    bme.setIIRFilterSize(BME680_FILTER_SIZE_3);
-    bme.setGasHeater(320, 150);
-
-    Serial.println("[OK] Sensor configurado. Iniciando lecturas...\n");
+    // --- Gateway de caidas: WiFi/MQTT + escaneo BLE de la baliza ---
+    haNotifyInit();      // WiFi + MQTT a Home Assistant (no bloqueante)
+    bleListenerInit();   // empieza a escuchar la baliza "TFM-FALL"
 }
 
-void loop() {
+// Relé de caida: si la baliza del reloj APARECE (flanco de subida),
+// mandamos a Home Assistant la misma señal que enviaba el reloj.
+void handleFallRelay() {
+    bool present = bleFallBeaconPresent();
+
+    if (present && !fallBeaconPrev) {
+        Serial.println("\n############################################");
+        Serial.println("###   BALIZA DE CAIDA DETECTADA (BLE)    ###");
+        Serial.println("###   Avisando a Home Assistant...       ###");
+        Serial.println("############################################\n");
+        haNotifyFall();
+    } else if (!present && fallBeaconPrev) {
+        Serial.println("[BLE] La baliza de caida ha desaparecido (alarma finalizada)\n");
+    }
+
+    fallBeaconPrev = present;
+}
+
+// Lee el BME680, evalua alarmas de ambiente y lo muestra por el monitor.
+void leerYMostrarBME680() {
     if (!bme.performReading()) {
         Serial.println("[ERROR] Fallo en la lectura del sensor.");
-        delay(READ_INTERVAL_MS);
         return;
     }
 
@@ -217,17 +246,16 @@ void loop() {
             baselineReady = true;
             Serial.printf("[OK] Calibracion completada. Baseline: %.1f kOhm\n\n", gasBaseline);
         }
-        delay(READ_INTERVAL_MS);
         return;
     }
 
     float iaq = calcularIAQ(gasResistancia, humedad);
     float eco2 = calcularECO2(iaq);
 
-    // Evaluar alarmas — rellena alarmState global
+    // Evaluar alarmas de ambiente — rellena alarmState global
     evaluarAlarmas(eco2, gasResistancia, temperatura, humedad);
 
-    // Mostrar lecturas
+    // Mostrar lecturas por el monitor serie
     Serial.println("========================================");
     Serial.println("       LECTURA DEL SENSOR BME680       ");
     Serial.println("========================================");
@@ -238,18 +266,30 @@ void loop() {
     Serial.println("----------------------------------------");
     Serial.printf("  IAQ:          %.0f (%s)\n", iaq, etiquetaIAQ(iaq));
     Serial.printf("  eCO2:         %.0f ppm\n", eco2);
+    Serial.println("----------------------------------------");
+    Serial.printf("  WiFi: %s | MQTT: %s\n",
+                  haWifiConnected() ? "OK" : "--",
+                  haMqttConnected() ? "OK" : "--");
     Serial.println("========================================");
 
-    // Imprimir alarmas con sus identificadores
-    imprimirAlarmas();
-
-    // --- Aqui puedes usar alarmState desde otras funcionalidades ---
-    // Ejemplo:
-    //   if (alarmState.activeFlags & ALARM_CO2)  -> hay alarma de CO2
-    //   if (alarmState.activeFlags & ALARM_GAS)   -> hay alarma de gas
-    //   if (alarmState.numAlarmas > 0)             -> hay alguna alarma critica
-    //   alarmState.eventos[0].id                   -> "CO2", "GAS", "TEMP_H", etc.
-
+    imprimirAlarmas();   // alarmas de ambiente: SOLO por pantalla (de momento)
     Serial.println();
-    delay(READ_INTERVAL_MS);
+}
+
+void loop() {
+    // 1) WiFi/MQTT y envio de avisos pendientes (no bloquea)
+    haNotifyLoop();
+
+    // 2) Relé de caida: reacciona al instante a la baliza BLE
+    handleFallRelay();
+
+    // 3) Lectura del BME680 cada READ_INTERVAL_MS (sin delay() bloqueante)
+    static uint32_t lastRead = 0;
+    uint32_t now = millis();
+    if (bmeOk && now - lastRead >= READ_INTERVAL_MS) {
+        lastRead = now;
+        leerYMostrarBME680();
+    }
+
+    delay(5);  // pequeña cesion de CPU; el loop sigue siendo muy reactivo
 }
