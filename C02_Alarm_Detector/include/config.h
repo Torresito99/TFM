@@ -1,50 +1,45 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-// --- Pines I2C para ESP32 Mini (WROOM-32, chip USB CH9102F) ---
-// Pines I2C por defecto del ESP32 clasico. Conecta el BME680:
-//   SDA -> GPIO21,  SCL -> GPIO22,  VCC -> 3V3,  GND -> GND
+// Parametros del gateway: bus del sensor, umbrales ambientales, BLE y MQTT.
+
+// Bus I2C del BME680 (ESP32 Mini / WROOM-32).
+// Conexion: SDA->GPIO21, SCL->GPIO22, VCC->3V3, GND->GND.
 #define I2C_SDA 21
 #define I2C_SCL 22
-// (Placa antigua LilyGo T-Energy S3 usaba SDA=18, SCL=17)
 
-// --- Umbrales de alarma (adaptados a personas mayores) ---
-// Personas mayores tienen menor capacidad de termorregulacion,
-// mayor sensibilidad respiratoria y menor percepcion de riesgo.
+// Umbrales ambientales ajustados a personas mayores, mas sensibles a la
+// temperatura, la humedad y los gases que la poblacion general.
+#define CO2_THRESHOLD_PPM       800    // eCO2 estimado (ppm)
+#define GAS_RESISTANCE_MIN_KOHM 70     // por debajo: posibles gases nocivos
 
-#define CO2_THRESHOLD_PPM       800    // Mas bajo que 1000 general: mayores son mas sensibles
-#define GAS_RESISTANCE_MIN_KOHM 70     // Umbral mas alto: detectar antes gases nocivos
+#define TEMP_MAX_C              32.0   // riesgo de golpe de calor
+#define TEMP_WARN_C             28.0   // aviso de calor
+#define TEMP_MIN_C              16.0   // riesgo de hipotermia
+#define TEMP_WARN_MIN_C         18.0   // aviso de frio
 
-// Temperatura: mayores sufren golpe de calor desde 35C y hipotermia bajo 16C
-#define TEMP_MAX_C              32.0   // Riesgo de golpe de calor en mayores
-#define TEMP_WARN_C             28.0   // Aviso preventivo de calor
-#define TEMP_MIN_C              16.0   // Riesgo de hipotermia en mayores
-#define TEMP_WARN_MIN_C         18.0   // Aviso preventivo de frio
+#define HUMIDITY_MAX            70.0   // humedad excesiva (moho, disnea)
+#define HUMIDITY_MIN            30.0   // aire demasiado seco
 
-// Humedad: vias respiratorias mas vulnerables en mayores
-#define HUMIDITY_MAX            70.0   // Dificulta respiracion, favorece moho
-#define HUMIDITY_MIN            30.0   // Reseca mucosas, aumenta infecciones
-
-// --- Intervalo de lectura (ms) ---
+// Periodo de lectura del BME680 y de salida por el monitor serie.
 #define READ_INTERVAL_MS 2000
 
-// =====================================================================
-//  BLE — Baliza de caida emitida por el reloj (FallDetector New Version)
-//  El reloj hace advertising (sin conexion) con nombre "TFM-FALL" y unos
-//  datos de fabricante que contienen "FALL". Este dispositivo escanea
-//  continuamente y, al ver la baliza, dispara el aviso a Home Assistant.
-// =====================================================================
-#define BLE_GATEWAY_NAME      "TFM-GATEWAY" // nombre BLE de este dispositivo
-#define BLE_BEACON_NAME       "TFM-FALL"    // nombre que emite el reloj al caer
-#define BLE_SCAN_SECONDS      5             // duracion de cada ciclo de escaneo (se reanuda solo)
-#define BLE_BEACON_TIMEOUT_MS 4000          // sin ver la baliza este tiempo => caida finalizada
+// Baliza BLE del reloj de caidas. El gateway escanea de forma continua y
+// dispara el aviso al detectarla.
+#define BLE_GATEWAY_NAME      "TFM-GATEWAY"  // nombre BLE de este dispositivo
+#define BLE_BEACON_NAME       "TFM-FALL"     // nombre que emite el reloj
+#define BLE_SCAN_SECONDS      5              // duracion de cada ciclo de escaneo
+#define BLE_BEACON_TIMEOUT_MS 4000           // ausencia que marca el fin de la alarma
 
-// =====================================================================
-//  MQTT / Home Assistant — MISMA señal que enviaba el reloj antiguo.
-//  (Las credenciales/broker estan en secrets.h)
-// =====================================================================
+// Aviso de caida a Home Assistant. Broker y credenciales en secrets.h.
 #define MQTT_TOPIC_FALL    "falldetector/fall"
 #define MQTT_PAYLOAD_FALL  "{\"event\":\"fall_detected\"}"
 #define MQTT_FALL_RETAINED true
+
+// Telemetria ambiental: envio periodico en un topic independiente del aviso de
+// caida, con un JSON que agrupa todas las magnitudes del BME680.
+#define MQTT_TOPIC_ENV     "c02alarm/ambiente"
+#define MQTT_ENV_RETAINED  true
+#define ENV_PUBLISH_MS     10000
 
 #endif

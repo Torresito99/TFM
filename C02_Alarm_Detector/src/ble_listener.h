@@ -1,19 +1,15 @@
-// =====================================================================
-//  ble_listener.h — Escucha la baliza BLE de caida del reloj.
-//
-//  El reloj (FallDetector New Version) EMITE (advertising, sin conexion)
-//  un paquete con nombre "TFM-FALL" cuando suena la alarma de caida.
-//  Aqui escaneamos continuamente y exponemos si la baliza esta presente.
-// =====================================================================
 #pragma once
+
+// Escaneo de la baliza BLE de caida ("TFM-FALL"), que el reloj emite por
+// advertising. Expone si la baliza esta presente para que el gateway decida.
 
 #include <cstdint>
 
-// Inicia el escaneo BLE continuo. Llamar una vez en setup().
+// Arranca el escaneo continuo. Llamar una vez en setup().
 void bleListenerInit();
 
-// true mientras la baliza de caida se este viendo (refrescado por escaneo).
+// true mientras la baliza se haya visto dentro de la ventana de timeout.
 bool bleFallBeaconPresent();
 
-// millis() de la ultima vez que se vio la baliza (0 si nunca).
+// Instante (millis) de la ultima deteccion; 0 si nunca se ha visto.
 uint32_t bleLastSeenMs();
