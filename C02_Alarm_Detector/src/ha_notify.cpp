@@ -5,9 +5,8 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 
-// ─── Tiempos de reintento (no bloqueante) ───────────────────────────
-static constexpr uint32_t WIFI_RETRY_MS = 10000;  // reintentar WiFi cada 10 s
-static constexpr uint32_t MQTT_RETRY_MS = 3000;   // reintentar MQTT cada 3 s
+static constexpr uint32_t WIFI_RETRY_MS = 10000;
+static constexpr uint32_t MQTT_RETRY_MS = 3000;
 
 static WiFiClient   wifiClient;
 static PubSubClient mqtt(wifiClient);
@@ -15,7 +14,7 @@ static PubSubClient mqtt(wifiClient);
 static uint32_t lastWifiTry = 0;
 static uint32_t lastMqttTry = 0;
 static bool wifiBegun = false;
-static bool pendingFall = false;   // hay una caida por enviar
+static bool pendingFall = false;   // aviso de caida pendiente de enviar
 
 static bool wifiOk() { return WiFi.status() == WL_CONNECTED; }
 
@@ -23,7 +22,7 @@ void haNotifyInit() {
   WiFi.mode(WIFI_STA);
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);  // NO esperamos aqui (no bloquea)
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);   // conexion en segundo plano
   wifiBegun = true;
   lastWifiTry = millis();
 
@@ -42,6 +41,18 @@ static bool publishFall() {
                         MQTT_TOPIC_FALL, MQTT_PAYLOAD_FALL);
   else    Serial.println("[MQTT] Fallo al enviar la caida, queda pendiente");
   return ok;
+}
+
+void haPublishEnvironment(float temp, float hum, float pres, float gas,
+                          float iaq, float eco2) {
+  if (!mqtt.connected()) return;
+  char payload[160];
+  snprintf(payload, sizeof(payload),
+           "{\"temp\":%.1f,\"hum\":%.1f,\"pres\":%.1f,\"gas\":%.1f,\"iaq\":%.0f,\"eco2\":%.0f}",
+           temp, hum, pres, gas, iaq, eco2);
+  if (mqtt.publish(MQTT_TOPIC_ENV, payload, MQTT_ENV_RETAINED)) {
+    Serial.printf("[MQTT] Ambiente -> %s %s\n", MQTT_TOPIC_ENV, payload);
+  }
 }
 
 static void tryWifi() {
@@ -67,8 +78,8 @@ static void tryMqtt() {
   }
 }
 
-// Avisa una sola vez por la IP cuando el WiFi conecta (util para diagnosticar
-// que la placa esta en la misma red que el broker / Home Assistant).
+// Notifica una sola vez la IP obtenida; sirve para confirmar que el gateway
+// esta en la misma red que el broker.
 static void announceWifi() {
   static bool announced = false;
   if (wifiOk() && !announced) {
@@ -87,14 +98,13 @@ void haNotifyLoop() {
   tryMqtt();
   mqtt.loop();
 
-  // Si hay una caida pendiente y ya podemos enviarla, se envia.
   if (pendingFall && publishFall()) {
     pendingFall = false;
   }
 }
 
 void haNotifyFall() {
-  // Intento directo para minima latencia; si no, queda pendiente.
+  // Intento directo para minima latencia; si falla, queda pendiente.
   if (publishFall()) {
     pendingFall = false;
   } else {

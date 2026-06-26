@@ -9,17 +9,16 @@ static BLEScan* pScan = nullptr;
 static volatile uint32_t lastSeenMs = 0;
 static volatile bool everSeen = false;
 
-// Callback que se dispara por cada anuncio BLE recibido durante el escaneo.
 class BeaconCallbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice dev) override {
     bool match = false;
 
-    // 1) Por nombre del anuncio: "TFM-FALL"
+    // Coincidencia por nombre del anuncio.
     if (dev.haveName() && dev.getName() == BLE_BEACON_NAME) {
       match = true;
     }
 
-    // 2) Por datos de fabricante: el reloj mete {0xFF,0xFF,'F','A','L','L'}
+    // Respaldo: datos de fabricante {0xFF,0xFF,'F','A','L','L'}.
     if (!match && dev.haveManufacturerData()) {
       String md = dev.getManufacturerData();
       if (md.indexOf("FALL") >= 0) match = true;
@@ -32,8 +31,7 @@ class BeaconCallbacks : public BLEAdvertisedDeviceCallbacks {
   }
 };
 
-// Al terminar cada ciclo de escaneo, limpiamos resultados y lo reanudamos.
-// Asi el escaneo es CONTINUO y NO bloquea el loop principal.
+// Reanuda el escaneo al cerrar cada ciclo: asi es continuo y no bloquea el loop.
 static void scanCompleteCB(BLEScanResults results) {
   pScan->clearResults();
   pScan->start(BLE_SCAN_SECONDS, scanCompleteCB, false);
@@ -42,11 +40,11 @@ static void scanCompleteCB(BLEScanResults results) {
 void bleListenerInit() {
   BLEDevice::init(BLE_GATEWAY_NAME);
   pScan = BLEDevice::getScan();
-  pScan->setAdvertisedDeviceCallbacks(new BeaconCallbacks(), true /*wantDuplicates*/);
-  pScan->setActiveScan(true);   // pide scan response (mas fiable para el nombre)
+  pScan->setAdvertisedDeviceCallbacks(new BeaconCallbacks(), true);
+  pScan->setActiveScan(true);   // scan response: deteccion mas fiable del nombre
   pScan->setInterval(100);
   pScan->setWindow(99);
-  pScan->start(BLE_SCAN_SECONDS, scanCompleteCB, false);  // arranque no bloqueante
+  pScan->start(BLE_SCAN_SECONDS, scanCompleteCB, false);
   Serial.println("[BLE] Escaneando baliza de caida (TFM-FALL)...");
 }
 
